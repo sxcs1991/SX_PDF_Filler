@@ -26,6 +26,9 @@ button:disabled{opacity:.45;cursor:not-allowed}
 table{border-collapse:collapse;width:100%}
 th,td{text-align:left;padding:6px 9px;border-bottom:1px solid var(--line);vertical-align:top}
 th{position:sticky;top:0;background:var(--card);font-size:12px;color:var(--mute);text-transform:uppercase;letter-spacing:.03em;white-space:nowrap}
+.fcb{width:16px;height:16px;cursor:pointer;accent-color:var(--pri,#1f3a6e)}
+#fieldTbl tr.off td{opacity:.45}
+.fsel{display:flex;gap:8px;align-items:center;margin:0 0 8px;flex-wrap:wrap}
 .scroll{max-height:380px;overflow:auto;border:1px solid var(--line);border-radius:8px}
 .chip{display:inline-block;padding:1px 8px;border-radius:99px;background:var(--chip);font-size:12px}
 .chip.ok{background:var(--okbg);color:var(--ok)}.chip.err{background:var(--errbg);color:var(--err)}.chip.warn{background:var(--warnbg);color:var(--warn)}
@@ -103,6 +106,7 @@ header .sp{flex:1}header button{padding:4px 10px;font-size:13px}
       <button id="btnDesigner2" hidden>Design fields manually instead</button>
     </div>
     <div id="s2msg"></div>
+    <div class="fsel" id="fieldSel" hidden><span id="fieldCount" class="sub"></span><button id="fAll" type="button">Select all</button><button id="fNone" type="button">Select none</button></div>
     <div class="scroll" id="fieldTblWrap"><table id="fieldTbl"></table></div>
   </section>
 
@@ -268,7 +272,8 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = URL.createObjectURL(new Blob([Uint8Arra
 const { PDFDocument, PDFName, PDFDict, PDFRef, PDFArray, StandardFonts, rgb, PDFCheckBox, PDFRadioGroup, PDFDropdown, PDFOptionList, PDFTextField, PDFButton, PDFSignature } = PDFLib;
 const $ = (s, r = document) => r.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-const S = { file: null, bytes: null, hash: '', pageCount: 0, mode: null, fields: [], boxes: [], layoutName: '', sheet: null, results: [], sel: new Set() };
+const S = { file: null, bytes: null, hash: '', pageCount: 0, mode: null, fields: [], boxes: [], layoutName: '', sheet: null, results: [], sel: new Set(), skip: new Set() };
+const selFields = () => S.fields.filter(f => !S.skip.has(f.name));
 
 /* ---------- small utils ---------- */
 function download(name, data, type) {
@@ -575,7 +580,7 @@ function persistLayout() { try { localStorage.setItem(LSK + S.hash, JSON.stringi
 function resetDownstream() { S.sheet = null; S.results = []; S.sel = new Set(); P.cache.clear(); $('#s3').hidden = true; $('#s4').hidden = true; $('#s3msg').innerHTML = ''; $('#sheetName').textContent = ''; }
 
 async function handlePdf(file) {
-  msg('#s1msg', 'info', 'Scanning ' + esc(file.name) + '…'); resetDownstream(); $('#s2').hidden = true;
+  msg('#s1msg', 'info', 'Scanning ' + esc(file.name) + '…'); resetDownstream(); $('#s2').hidden = true; S.skip = new Set();
   try {
     const bytes = new Uint8Array(await file.arrayBuffer());
     if (bytes.length > 60 * 1024 * 1024) throw new Error('This PDF is larger than 60 MB.');
@@ -602,26 +607,33 @@ function renderS2() {
   const flat = S.mode === 'flat';
   $('#btnDesigner').hidden = !flat; $('#btnDesigner2').hidden = flat;
   $('#btnDesigner').textContent = S.boxes.length ? 'Edit layout in Field Designer' : 'Open Field Designer';
-  $('#btnTpl').disabled = !S.fields.length;
+  $('#btnTpl').disabled = !selFields().length;
   $('#s2sum').textContent = flat
     ? (S.fields.length ? `Layout “${S.layoutName || 'unnamed'}”: ${S.fields.length} fields from ${S.boxes.length} boxes.` : 'No fields yet — design the layout first.')
     : `${S.fields.length} fillable columns detected (${S.fields.filter(f => f.kind === 'check').length} checkboxes, ${S.fields.filter(f => f.kind === 'choice').length} choices).`;
   const t = $('#fieldTbl');
-  t.innerHTML = '<tr><th>#</th><th>Column name</th><th>Type</th><th>Page</th><th>Details</th></tr>' + S.fields.map((f, i) => {
+  t.innerHTML = '<tr><th><input type="checkbox" class="fcb" id="fHead" title="Select / unselect all"></th><th>#</th><th>Column name</th><th>Type</th><th>Page</th><th>Details</th></tr>' + S.fields.map((f, i) => {
     let det = f.tip || '';
     if (f.kind === 'choice') det = (det ? det + ' — ' : '') + 'Options: ' + f.options.map(o => shortLabel(o.label)).join(' | ');
     if (f.kind === 'group') det = `Spread across ${f.maxLen} boxes. ` + det;
     const type = { text: 'Text', check: 'Checkbox (X)', choice: 'Choice', group: 'Text ×' + f.maxLen }[f.kind];
     const pg = f.pages ? f.pages.join(', ') : f.page || '';
-    return `<tr><td>${i + 1}</td><td><code>${esc(f.name)}</code></td><td>${type}</td><td>${pg}</td><td>${esc(det)}</td></tr>`;
+    return `<tr class="${S.skip.has(f.name) ? 'off' : ''}"><td><input type="checkbox" class="fcb frow" data-i="${i}" ${S.skip.has(f.name) ? '' : 'checked'} title="Include this field in the template"></td><td>${i + 1}</td><td><code>${esc(f.name)}</code></td><td>${type}</td><td>${pg}</td><td>${esc(det)}</td></tr>`;
   }).join('');
-  $('#fieldTblWrap').hidden = !S.fields.length;
+  $('#fieldTblWrap').hidden = !S.fields.length; $('#fieldSel').hidden = !S.fields.length; updFieldSel();
   $('#s3').hidden = !S.fields.length;
-  if (S.fields.length) msg('#s2msg', 'info', 'Download the template, fill in one row per participant, then upload it in step 3.'); else msg('#s2msg', '', '');
+  if (S.fields.length) msg('#s2msg', 'info', 'Tick only the fields you need, download the template, fill in one row per participant, then upload it in step 3.'); else msg('#s2msg', '', '');
 }
 
+function updFieldSel() {
+  const n = selFields().length, tot = S.fields.length;
+  $('#fieldCount').textContent = `${n} of ${tot} fields selected for the template`;
+  $('#btnTpl').disabled = !n;
+  const h = $('#fHead'); if (h) { h.checked = n === tot && tot > 0; h.indeterminate = n > 0 && n < tot; }
+  document.querySelectorAll('#fieldTbl .frow').forEach(cb => cb.closest('tr').classList.toggle('off', !cb.checked));
+}
 function guessNameFields() {
-  const names = S.fields.map(f => f.name);
+  const names = selFields().map(f => f.name);
   const first = names.find(n => /(first|fname|given)/i.test(n) && !/(spouse|plan|pap|vested)/i.test(n));
   const last = names.find(n => /(last|lname|surname)/i.test(n) && !/(spouse|plan|pap|vested)/i.test(n));
   if (first || last) return [first || '', last || ''];
@@ -635,11 +647,11 @@ async function handleSheet(file) {
     const sh = await readSheet(file); S.sheet = sh;
     const fieldNames = S.fields.map(f => norm(f.name)); const hs = sh.headers.filter(Boolean);
     const matched = hs.filter(h => fieldNames.includes(norm(h))); const unknown = hs.filter(h => !fieldNames.includes(norm(h)));
-    const missing = S.fields.filter(f => !hs.some(h => norm(h) === norm(f.name)));
+    const missing = selFields().filter(f => !hs.some(h => norm(h) === norm(f.name)));
     if (!matched.length) { msg('#s3msg', 'err', 'None of the spreadsheet column headers match this PDF’s fields. Use the template generated for this exact PDF.'); $('#s4').hidden = true; return; }
     S.results = sh.rows.map(r => ({ line: r.line, values: r.values, ...validateRow(r.values) }));
     const bad = S.results.filter(r => r.errors.length).length;
-    let h = `<div>✓ ${matched.length} of ${S.fields.length} PDF fields matched a column</div><div>✓ ${S.results.length} data row${S.results.length === 1 ? '' : 's'} found (empty rows ignored)</div>`;
+    let h = `<div>✓ ${matched.length} of ${Math.max(matched.length, selFields().length)} selected fields matched a column</div><div>✓ ${S.results.length} data row${S.results.length === 1 ? '' : 's'} found (empty rows ignored)</div>`;
     if (unknown.length) h += `<div>⚠ ${unknown.length} unknown column${unknown.length > 1 ? 's' : ''} ignored: ${esc(unknown.slice(0, 8).join(', '))}${unknown.length > 8 ? '…' : ''}</div>`;
     if (missing.length) h += `<div>⚠ ${missing.length} field${missing.length > 1 ? 's' : ''} have no column (will stay blank)</div>`;
     if (bad) h += `<div>⚠ ${bad} row${bad > 1 ? 's have' : ' has'} value problems — shown below; those rows can’t be downloaded until fixed</div>`;
@@ -650,7 +662,7 @@ async function handleSheet(file) {
 }
 
 function setupFilenameControls() {
-  const opts = '<option value="">(none)</option>' + S.fields.map(f => `<option>${esc(f.name)}</option>`).join('');
+  const opts = '<option value="">(none)</option>' + selFields().map(f => `<option>${esc(f.name)}</option>`).join('');
   $('#fn1').innerHTML = opts; $('#fn2').innerHTML = opts; const [a, b] = guessNameFields(); $('#fn1').value = a; $('#fn2').value = b;
   $('#flatten').disabled = S.mode === 'flat'; if (S.mode === 'flat') $('#flatten').checked = false;
 }
@@ -713,9 +725,17 @@ pdfIn.onchange = () => { if (pdfIn.files[0]) handlePdf(pdfIn.files[0]); pdfIn.va
 ['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('over'); }));
 drop.addEventListener('drop', e => { const f = e.dataTransfer.files[0]; if (f) handlePdf(f); });
 $('#btnTpl').onclick = async () => {
-  try { const buf = await buildTemplate(S.fields); const base = (S.file.name || 'form').replace(/\.pdf$/i, '').replace(/[^A-Za-z0-9._-]+/g, '_'); download(base + '_template.xlsx', new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })); }
+  try { const buf = await buildTemplate(selFields()); const base = (S.file.name || 'form').replace(/\.pdf$/i, '').replace(/[^A-Za-z0-9._-]+/g, '_'); download(base + '_template.xlsx', new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })); }
   catch (e) { console.error(e); msg('#s2msg', 'err', 'Template failed — ' + esc(e.message || e)); }
 };
+$('#fieldTbl').addEventListener('change', e => {
+  const cb = e.target;
+  if (cb.id === 'fHead') { S.skip = cb.checked ? new Set() : new Set(S.fields.map(f => f.name)); document.querySelectorAll('#fieldTbl .frow').forEach(x => x.checked = cb.checked); }
+  else if (cb.classList.contains('frow')) { const f = S.fields[+cb.dataset.i]; cb.checked ? S.skip.delete(f.name) : S.skip.add(f.name); }
+  updFieldSel();
+});
+$('#fAll').onclick = () => { S.skip = new Set(); document.querySelectorAll('#fieldTbl .frow').forEach(x => x.checked = true); updFieldSel(); };
+$('#fNone').onclick = () => { S.skip = new Set(S.fields.map(f => f.name)); document.querySelectorAll('#fieldTbl .frow').forEach(x => x.checked = false); updFieldSel(); };
 $('#btnSheet').onclick = () => $('#sheetIn').click();
 $('#sheetIn').onchange = () => { const f = $('#sheetIn').files[0]; if (f) handleSheet(f); $('#sheetIn').value = ''; };
 $('#allcols').onchange = renderEntries; $('#fn1').onchange = $('#fn2').onchange = $('#fnPre').oninput = renderEntries;
